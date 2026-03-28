@@ -395,7 +395,11 @@ fn run_helper(config: HelperConfig) -> Result<()> {
         },
     )?;
 
+    #[cfg(target_os = "windows")]
+    let _winrt_apartment = WinRtApartment::initialize();
+
     let process_names = Arc::new(Mutex::new(load_process_names()));
+    let display_names = Arc::new(Mutex::new(HashMap::<u32, String>::new()));
     let counters = Arc::new(Mutex::new(HashMap::<u32, ProcessBucket>::new()));
     let running = Arc::new(AtomicBool::new(true));
     let trace_name = format!("netmonitor-helper-{}-{}", std::process::id(), now_epoch_ms());
@@ -424,7 +428,7 @@ fn run_helper(config: HelperConfig) -> Result<()> {
     });
 
     let tcp_provider = build_tcp_provider(process_names.clone(), counters.clone());
-    let process_provider = build_process_provider(process_names.clone());
+    let process_provider = build_process_provider(process_names.clone(), display_names.clone());
     let kernel_trace = KernelTrace::new()
         .named(trace_name)
         .enable(tcp_provider)
@@ -449,7 +453,7 @@ fn run_helper(config: HelperConfig) -> Result<()> {
 
     while running.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_secs(3));
-        let snapshots = drain_process_buckets(&counters, &process_names);
+        let snapshots = drain_process_buckets(&counters, &process_names, &display_names);
         if let Err(error) = write_helper_message(
             &mut writer,
             &HelperMessage::Processes {
@@ -518,7 +522,10 @@ fn build_tcp_provider(
         .build()
 }
 
-fn build_process_provider(process_names: Arc<Mutex<HashMap<u32, String>>>) -> Provider {
+fn build_process_provider(
+    process_names: Arc<Mutex<HashMap<u32, String>>>,
+    display_names: Arc<Mutex<HashMap<u32, String>>>,
+) -> Provider {
     let callback = move |record: &EventRecord, locator: &SchemaLocator| {
         let opcode = record.opcode();
         let Ok(schema) = locator.event_schema(record) else {
@@ -532,11 +539,19 @@ fn build_process_provider(process_names: Arc<Mutex<HashMap<u32, String>>>) -> Pr
         match opcode {
             1 | 3 => {
                 if let Ok(image_name) = parser.try_parse::<String>("ImageFileName") {
-                    process_names.lock().unwrap().insert(pid, image_name);
+                    let mut names = process_names.lock().unwrap();
+                    match names.get_mut(&pid) {
+                        Some(current) if looks_like_path(current) && !looks_like_path(&image_name) => {}
+                        Some(current) => *current = image_name,
+                        None => {
+                            names.insert(pid, image_name);
+                        }
+                    }
                 }
             }
             2 | 4 => {
                 process_names.lock().unwrap().remove(&pid);
+                display_names.lock().unwrap().remove(&pid);
             }
             _ => {}
         }
@@ -557,9 +572,11 @@ struct ProcessBucket {
 fn drain_process_buckets(
     counters: &Arc<Mutex<HashMap<u32, ProcessBucket>>>,
     process_names: &Arc<Mutex<HashMap<u32, String>>>,
+    display_names: &Arc<Mutex<HashMap<u32, String>>>,
 ) -> Vec<ProcessSnapshot> {
     let mut buckets = counters.lock().unwrap();
     let known_names = process_names.lock().unwrap().clone();
+    let mut display_name_cache = display_names.lock().unwrap();
 
     let mut snapshots = buckets
         .drain()
@@ -579,7 +596,10 @@ fn drain_process_buckets(
 
             Some(ProcessSnapshot {
                 pid,
-                display_name: display_name_from_image(&image_name),
+                display_name: display_name_cache
+                    .entry(pid)
+                    .or_insert_with(|| display_name_for_process(pid, &image_name))
+                    .clone(),
                 image_name,
                 down_bps: bucket.down_bytes * 8,
                 up_bps: bucket.up_bytes * 8,
@@ -616,19 +636,37 @@ fn load_process_names() -> HashMap<u32, String> {
         .collect()
 }
 
-fn display_name_from_image(image_name: &str) -> String {
+fn display_name_for_process(pid: u32, image_name: &str) -> String {
     #[cfg(target_os = "windows")]
-    if let Some(friendly_name) = file_description_from_path(image_name) {
-        return friendly_name;
+    {
+        if let Some(friendly_name) = resolve_packaged_app_name(pid) {
+            return friendly_name;
+        }
+
+        if let Some(process_path) = process_path_from_pid(pid) {
+            if let Some(friendly_name) = file_description_from_path(&process_path) {
+                return friendly_name;
+            }
+        }
+
+        if let Some(friendly_name) = file_description_from_path(image_name) {
+            return friendly_name;
+        }
     }
 
-    let stem = PathBuf::from(image_name)
+    friendly_name_fallback(&display_stem_from_image(image_name))
+}
+
+fn display_stem_from_image(image_name: &str) -> String {
+    PathBuf::from(image_name)
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| image_name.to_string());
+        .unwrap_or_else(|| image_name.to_string())
+}
 
-    friendly_name_fallback(&stem)
+fn looks_like_path(value: &str) -> bool {
+    value.contains('\\') || value.contains('/') || value.contains(':')
 }
 
 fn friendly_name_fallback(name: &str) -> String {
@@ -676,6 +714,85 @@ fn humanize_process_name(name: &str) -> String {
         name.to_string()
     } else {
         result
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_packaged_app_name(pid: u32) -> Option<String> {
+    use windows::{
+        core::{HSTRING, PWSTR},
+        Management::Deployment::PackageManager,
+        Win32::{
+            Foundation::{APPMODEL_ERROR_NO_PACKAGE, ERROR_INSUFFICIENT_BUFFER},
+            Storage::Packaging::Appx::GetPackageFamilyName,
+            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        },
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    let _process = OwnedHandle(process);
+
+    let mut length = 0u32;
+    let status = unsafe { GetPackageFamilyName(process, &mut length, None) };
+    if status == APPMODEL_ERROR_NO_PACKAGE || status != ERROR_INSUFFICIENT_BUFFER || length == 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0u16; length as usize];
+    let status = unsafe {
+        GetPackageFamilyName(process, &mut length, Some(PWSTR(buffer.as_mut_ptr())))
+    };
+    if status.0 != 0 {
+        return None;
+    }
+
+    let end = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    let package_family_name = String::from_utf16_lossy(&buffer[..end]).trim().to_string();
+    if package_family_name.is_empty() {
+        return None;
+    }
+
+    let package_manager = PackageManager::new().ok()?;
+    let packages = package_manager
+        .FindPackagesByPackageFamilyName(&HSTRING::from(package_family_name))
+        .ok()?;
+
+    for package in packages {
+        let display_name = package.DisplayName().ok()?.to_string();
+        let display_name = display_name.trim();
+        if !display_name.is_empty() {
+            return Some(display_name.to_string());
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn process_path_from_pid(pid: u32) -> Option<String> {
+    use windows::{
+        core::PWSTR,
+        Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    let _process = OwnedHandle(process);
+
+    let mut buffer = vec![0u16; 32768];
+    let mut length = buffer.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut length)
+            .ok()?;
+    }
+
+    let text = String::from_utf16_lossy(&buffer[..length as usize]).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
     }
 }
 
@@ -772,6 +889,40 @@ fn file_description_from_path(image_name: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(target_os = "windows")]
+struct OwnedHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WinRtApartment {
+    initialized: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl WinRtApartment {
+    fn initialize() -> Self {
+        use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+
+        let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+        Self { initialized }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WinRtApartment {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe { windows::Win32::System::WinRT::RoUninitialize() };
+        }
+    }
 }
 
 fn write_helper_message(writer: &mut Stream, message: &HelperMessage) -> Result<()> {

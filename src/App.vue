@@ -38,31 +38,53 @@ const summary = ref<SummarySnapshot>({
   sampledAt: 0,
   adapters: [],
 });
+
 const processes = ref<ProcessSnapshot[]>([]);
 const monitoringState = ref<MonitoringState>({
   processDetailsEnabled: false,
   permissionState: "idle",
   lastError: null,
 });
+
 const isBusy = ref(false);
 const unlisteners = ref<UnlistenFn[]>([]);
 
-const adapterLabel = computed(() =>
-  summary.value.adapters.length > 0 ? summary.value.adapters.join(", ") : "等待可用网卡",
+const processMonitoringActive = computed(
+  () =>
+    monitoringState.value.processDetailsEnabled &&
+    monitoringState.value.permissionState === "granted",
 );
 
-const permissionHeadline = computed(() => {
+const visibleProcesses = computed(() =>
+  processes.value.filter((process) => Math.max(process.downBps, process.upBps) >= 5_000),
+);
+
+const primaryActionLabel = computed(() => {
   switch (monitoringState.value.permissionState) {
     case "pending":
-      return "等待 Windows 管理员授权";
-    case "granted":
-      return "每进程监控已开启";
+      return "等待授权中";
     case "denied":
-      return "管理员授权被拒绝";
     case "error":
-      return "进程监控出现错误";
+      return "重新申请授权";
     default:
-      return "详细监控当前未开启";
+      return "开启应用详情";
+  }
+});
+
+const panelTitle = computed(() =>
+  processMonitoringActive.value ? "网络占用排行" : "应用占用",
+);
+
+const panelDescription = computed(() => {
+  switch (monitoringState.value.permissionState) {
+    case "pending":
+      return "等待 Windows 管理员授权，授权完成后会自动开始采集每个应用的实时上下行速率。";
+    case "denied":
+      return "你已拒绝管理员授权。再次申请后，才会显示每个应用的实时网络占用。";
+    case "error":
+      return "进程级监控启动失败，可以在这里直接重新申请授权并重试。";
+    default:
+      return "授权后会展示每个应用的实时下载、上传和 PID 排行。";
   }
 });
 
@@ -84,15 +106,6 @@ async function requestProcessMonitoring() {
   isBusy.value = true;
   try {
     monitoringState.value = await invoke<MonitoringState>("request_process_monitoring");
-  } finally {
-    isBusy.value = false;
-  }
-}
-
-async function stopProcessMonitoring() {
-  isBusy.value = true;
-  try {
-    monitoringState.value = await invoke<MonitoringState>("stop_process_monitoring");
   } finally {
     isBusy.value = false;
   }
@@ -133,12 +146,10 @@ onBeforeUnmount(() => {
       <article class="metric card down">
         <span>下载</span>
         <strong>{{ formatSpeed(summary.downBps) }}</strong>
-        <small>{{ adapterLabel }}</small>
       </article>
       <article class="metric card up">
         <span>上传</span>
         <strong>{{ formatSpeed(summary.upBps) }}</strong>
-        <small>活动网卡会自动刷新</small>
       </article>
     </section>
 
@@ -146,14 +157,33 @@ onBeforeUnmount(() => {
       <div class="table-header">
         <div>
           <div class="eyebrow">应用占用</div>
-          <h2>网络占用排行</h2>
+          <h2>{{ panelTitle }}</h2>
+          <p class="table-copy">{{ panelDescription }}</p>
+          <p v-if="monitoringState.lastError" class="error-copy">{{ monitoringState.lastError }}</p>
         </div>
-        <span class="table-meta">{{ processes.length }} 条活动记录</span>
+
+        <div class="table-header-side">
+          <button
+            v-if="!processMonitoringActive"
+            class="primary"
+            type="button"
+            :disabled="isBusy || monitoringState.permissionState === 'pending'"
+            @click="requestProcessMonitoring"
+          >
+            {{ primaryActionLabel }}
+          </button>
+          <span v-else class="table-meta">{{ visibleProcesses.length }} 条活跃记录</span>
+        </div>
       </div>
 
-      <div v-if="processes.length === 0" class="empty-state">
-        <strong>暂时没有进程流量数据</strong>
-        <p>打开浏览器、播放流媒体，或者开启提权 helper 后，这里会显示实时排行。</p>
+      <div v-if="!processMonitoringActive" class="empty-state">
+        <strong>未开启应用级详情</strong>
+        <p>接受管理员授权后，这里会显示每个应用的实时网络占用排行。</p>
+      </div>
+
+      <div v-else-if="visibleProcesses.length === 0" class="empty-state">
+        <strong>当前没有活跃网络数据</strong>
+        <p>当前低于 5 Kbps 的进程已被隐藏，产生更明显的网络流量后会自动显示。</p>
       </div>
 
       <div v-else class="table-wrap">
@@ -168,7 +198,7 @@ onBeforeUnmount(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="process in processes" :key="`${process.pid}-${process.imageName}`">
+            <tr v-for="process in visibleProcesses" :key="`${process.pid}-${process.imageName}`">
               <td>{{ process.displayName }}</td>
               <td>{{ process.imageName }}</td>
               <td>{{ formatSpeed(process.downBps) }}</td>
@@ -177,35 +207,6 @@ onBeforeUnmount(() => {
             </tr>
           </tbody>
         </table>
-      </div>
-    </section>
-
-    <section class="status card">
-      <div>
-        <div class="eyebrow">进程详情</div>
-        <h2>{{ permissionHeadline }}</h2>
-        <p class="status-copy">
-          每进程实时流量统计依赖提权 helper，这样主程序在普通托盘模式下可以保持轻量运行。
-        </p>
-        <p v-if="monitoringState.lastError" class="error-copy">{{ monitoringState.lastError }}</p>
-      </div>
-      <div class="actions">
-        <button
-          class="primary"
-          type="button"
-          :disabled="isBusy || monitoringState.permissionState === 'pending'"
-          @click="requestProcessMonitoring"
-        >
-          {{ monitoringState.processDetailsEnabled ? "重启提权 helper" : "开启每应用详情" }}
-        </button>
-        <button
-          class="secondary"
-          type="button"
-          :disabled="isBusy || !monitoringState.processDetailsEnabled"
-          @click="stopProcessMonitoring"
-        >
-          停止进程监控
-        </button>
       </div>
     </section>
   </main>
@@ -246,9 +247,9 @@ button {
 
 .shell {
   min-height: 100vh;
-  padding: 28px;
+  padding: 10px;
   display: grid;
-  gap: 18px;
+  gap: 10px;
 }
 
 .card {
@@ -258,60 +259,34 @@ button {
   box-shadow: 0 22px 48px rgba(0, 0, 0, 0.28);
 }
 
-.eyebrow {
-  font-size: 12px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: #8ea8d9;
-  margin-bottom: 10px;
-}
-
-h2,
-p {
-  margin: 0;
-}
-
-h2 {
-  font-size: 24px;
-  line-height: 1.1;
-}
-
-.status-copy,
-.empty-state p {
-  margin-top: 12px;
-  color: rgba(233, 239, 248, 0.76);
-  max-width: 62ch;
-}
-
 .metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  gap: 8px;
 }
 
 .metric {
-  padding: 22px;
-  border-radius: 24px;
-  display: grid;
-  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .metric span,
 .table-meta,
 .empty-state strong {
   color: rgba(226, 234, 244, 0.78);
-  font-size: 13px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.14em;
 }
 
 .metric strong {
-  font-size: clamp(28px, 3vw, 36px);
-  line-height: 1;
-}
-
-.metric small {
-  color: rgba(226, 234, 244, 0.72);
+  font-size: clamp(20px, 2.6vw, 28px);
+  line-height: 1.05;
+  text-align: right;
 }
 
 .metric.down {
@@ -322,69 +297,73 @@ h2 {
   background: linear-gradient(140deg, rgba(150, 79, 34, 0.88), rgba(22, 14, 9, 0.96));
 }
 
-.status,
 .table-card {
-  border-radius: 28px;
-  padding: 24px;
+  border-radius: 24px;
+  padding: 20px;
 }
 
-.status {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) auto;
-  gap: 16px;
-  align-items: center;
+.eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #8ea8d9;
+  margin-bottom: 8px;
 }
 
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 12px;
+h2,
+p {
+  margin: 0;
 }
 
-.primary,
-.secondary {
-  border: none;
-  border-radius: 999px;
-  padding: 12px 18px;
-  cursor: pointer;
-  transition: transform 0.18s ease, opacity 0.18s ease;
+h2 {
+  font-size: 22px;
+  line-height: 1.1;
 }
 
-.primary {
-  background: linear-gradient(135deg, #f2f6ff, #b8d5ff);
-  color: #0f1d38;
-  font-weight: 700;
-}
-
-.secondary {
-  background: rgba(255, 255, 255, 0.08);
-  color: #f5f1e8;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-.primary:disabled,
-.secondary:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.primary:not(:disabled):hover,
-.secondary:not(:disabled):hover {
-  transform: translateY(-1px);
+.table-copy {
+  margin-top: 10px;
+  color: rgba(233, 239, 248, 0.76);
+  max-width: 60ch;
 }
 
 .error-copy {
-  margin-top: 10px;
+  margin-top: 8px;
   color: #ffb48a;
 }
 
 .table-header {
   display: flex;
   justify-content: space-between;
-  align-items: end;
-  gap: 12px;
-  margin-bottom: 20px;
+  align-items: start;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.table-header-side {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: max-content;
+}
+
+.primary {
+  border: none;
+  border-radius: 999px;
+  padding: 11px 18px;
+  cursor: pointer;
+  transition: transform 0.18s ease, opacity 0.18s ease;
+  background: linear-gradient(135deg, #f2f6ff, #b8d5ff);
+  color: #0f1d38;
+  font-weight: 700;
+}
+
+.primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.primary:not(:disabled):hover {
+  transform: translateY(-1px);
 }
 
 .table-wrap {
@@ -406,7 +385,7 @@ thead {
 th,
 td {
   text-align: left;
-  padding: 15px 16px;
+  padding: 14px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
@@ -432,16 +411,21 @@ td {
 
 @media (max-width: 900px) {
   .shell {
-    padding: 16px;
+    padding: 8px;
   }
 
   .metrics,
-  .status {
+  .table-header {
     grid-template-columns: 1fr;
   }
 
-  .actions {
+  .table-header {
+    display: grid;
+  }
+
+  .table-header-side {
     justify-content: flex-start;
+    min-width: 0;
   }
 }
 </style>
