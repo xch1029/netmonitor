@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+.cargo-home/
+.cargo-home-2/
 
 # Editor directories and files
 .vscode/*

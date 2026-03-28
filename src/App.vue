@@ -1,160 +1,503 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-const greetMsg = ref("");
-const name = ref("");
+type PermissionState = "idle" | "pending" | "granted" | "denied" | "error";
 
-async function greet() {
-  // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  greetMsg.value = await invoke("greet", { name: name.value });
+type SummarySnapshot = {
+  downBps: number;
+  upBps: number;
+  sampledAt: number;
+  adapters: string[];
+};
+
+type ProcessSnapshot = {
+  pid: number;
+  imageName: string;
+  displayName: string;
+  downBps: number;
+  upBps: number;
+};
+
+type MonitoringState = {
+  processDetailsEnabled: boolean;
+  permissionState: PermissionState;
+  lastError: string | null;
+};
+
+type BootstrapState = {
+  summary: SummarySnapshot;
+  processes: ProcessSnapshot[];
+  monitoringState: MonitoringState;
+};
+
+const summary = ref<SummarySnapshot>({
+  downBps: 0,
+  upBps: 0,
+  sampledAt: 0,
+  adapters: [],
+});
+const processes = ref<ProcessSnapshot[]>([]);
+const monitoringState = ref<MonitoringState>({
+  processDetailsEnabled: false,
+  permissionState: "idle",
+  lastError: null,
+});
+const isBusy = ref(false);
+const unlisteners = ref<UnlistenFn[]>([]);
+
+const totalTraffic = computed(() => summary.value.downBps + summary.value.upBps);
+const adapterLabel = computed(() =>
+  summary.value.adapters.length > 0 ? summary.value.adapters.join(", ") : "Waiting for active adapter",
+);
+const permissionHeadline = computed(() => {
+  switch (monitoringState.value.permissionState) {
+    case "pending":
+      return "Waiting for Windows admin approval";
+    case "granted":
+      return "Per-process monitoring is live";
+    case "denied":
+      return "Admin permission was declined";
+    case "error":
+      return "Process monitoring hit an error";
+    default:
+      return "Detailed monitoring is currently off";
+  }
+});
+
+function formatSpeed(bps: number) {
+  if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbps`;
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+  if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} Kbps`;
+  return `${bps} bps`;
 }
+
+function formatTimestamp(value: number) {
+  if (!value) return "Not sampled yet";
+  return new Date(value).toLocaleTimeString();
+}
+
+async function loadBootstrap() {
+  const bootstrap = await invoke<BootstrapState>("get_bootstrap_state");
+  summary.value = bootstrap.summary;
+  processes.value = bootstrap.processes;
+  monitoringState.value = bootstrap.monitoringState;
+}
+
+async function requestProcessMonitoring() {
+  isBusy.value = true;
+  try {
+    monitoringState.value = await invoke<MonitoringState>("request_process_monitoring");
+  } finally {
+    isBusy.value = false;
+  }
+}
+
+async function stopProcessMonitoring() {
+  isBusy.value = true;
+  try {
+    monitoringState.value = await invoke<MonitoringState>("stop_process_monitoring");
+  } finally {
+    isBusy.value = false;
+  }
+}
+
+onMounted(async () => {
+  try {
+    await loadBootstrap();
+  } catch (error) {
+    monitoringState.value = {
+      processDetailsEnabled: false,
+      permissionState: "error",
+      lastError: String(error),
+    };
+  }
+
+  unlisteners.value = [
+    await listen<SummarySnapshot>("monitor://summary", (event) => {
+      summary.value = event.payload;
+    }),
+    await listen<ProcessSnapshot[]>("monitor://processes", (event) => {
+      processes.value = [...event.payload];
+    }),
+    await listen<MonitoringState>("monitor://monitoring-state", (event) => {
+      monitoringState.value = event.payload;
+    }),
+  ];
+});
+
+onBeforeUnmount(() => {
+  for (const unlisten of unlisteners.value) unlisten();
+});
 </script>
 
 <template>
-  <main class="container">
-    <h1>Welcome to Tauri + Vue</h1>
+  <main class="shell">
+    <section class="hero card">
+      <div class="eyebrow">NetMonitor</div>
+      <div class="hero-grid">
+        <div>
+          <h1>Windows tray speed monitor</h1>
+          <p class="hero-copy">
+            The tray icon keeps showing live upload and download speed. This window is the detailed
+            breakdown for per-app traffic.
+          </p>
+        </div>
+        <div class="live-chip">
+          <span>Live total</span>
+          <strong>{{ formatSpeed(totalTraffic) }}</strong>
+          <small>Last sample {{ formatTimestamp(summary.sampledAt) }}</small>
+        </div>
+      </div>
+    </section>
 
-    <div class="row">
-      <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-      </a>
-    </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
+    <section class="metrics">
+      <article class="metric card down">
+        <span>Download</span>
+        <strong>{{ formatSpeed(summary.downBps) }}</strong>
+        <small>{{ adapterLabel }}</small>
+      </article>
+      <article class="metric card up">
+        <span>Upload</span>
+        <strong>{{ formatSpeed(summary.upBps) }}</strong>
+        <small>Active adapters update automatically</small>
+      </article>
+    </section>
 
-    <form class="row" @submit.prevent="greet">
-      <input id="greet-input" v-model="name" placeholder="Enter a name..." />
-      <button type="submit">Greet</button>
-    </form>
-    <p>{{ greetMsg }}</p>
+    <section class="status card">
+      <div>
+        <div class="eyebrow">Process Details</div>
+        <h2>{{ permissionHeadline }}</h2>
+        <p class="status-copy">
+          Real-time per-process traffic uses an elevated helper so the app can stay lightweight in
+          normal tray mode.
+        </p>
+        <p v-if="monitoringState.lastError" class="error-copy">{{ monitoringState.lastError }}</p>
+      </div>
+      <div class="actions">
+        <button
+          class="primary"
+          type="button"
+          :disabled="isBusy || monitoringState.permissionState === 'pending'"
+          @click="requestProcessMonitoring"
+        >
+          {{ monitoringState.processDetailsEnabled ? "Restart elevated helper" : "Enable per-app details" }}
+        </button>
+        <button
+          class="secondary"
+          type="button"
+          :disabled="isBusy || !monitoringState.processDetailsEnabled"
+          @click="stopProcessMonitoring"
+        >
+          Stop process monitoring
+        </button>
+      </div>
+    </section>
+
+    <section class="table-card card">
+      <div class="table-header">
+        <div>
+          <div class="eyebrow">Per-App Usage</div>
+          <h2>Top network consumers</h2>
+        </div>
+        <span class="table-meta">{{ processes.length }} active rows</span>
+      </div>
+
+      <div v-if="processes.length === 0" class="empty-state">
+        <strong>No per-process traffic yet</strong>
+        <p>Open a browser, stream something, or enable the elevated helper to start seeing live rankings.</p>
+      </div>
+
+      <div v-else class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>App</th>
+              <th>Process</th>
+              <th>Download</th>
+              <th>Upload</th>
+              <th>PID</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="process in processes" :key="`${process.pid}-${process.imageName}`">
+              <td>{{ process.displayName }}</td>
+              <td>{{ process.imageName }}</td>
+              <td>{{ formatSpeed(process.downBps) }}</td>
+              <td>{{ formatSpeed(process.upBps) }}</td>
+              <td>{{ process.pid }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </main>
 </template>
 
-<style scoped>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #249b73);
-}
-
-</style>
 <style>
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
+  color: #f6f4ef;
+  background:
+    radial-gradient(circle at top left, rgba(63, 108, 222, 0.35), transparent 32%),
+    radial-gradient(circle at top right, rgba(214, 110, 42, 0.3), transparent 28%),
+    linear-gradient(180deg, #0a1020 0%, #11192c 52%, #0b0f16 100%);
+  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  line-height: 1.5;
   font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
 }
 
-.container {
+* {
+  box-sizing: border-box;
+}
+
+body {
   margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
+  min-width: 320px;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
+button {
+  font: inherit;
 }
 
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
+#app {
+  min-height: 100vh;
 }
 
-.row {
-  display: flex;
-  justify-content: center;
+.shell {
+  min-height: 100vh;
+  padding: 28px;
+  display: grid;
+  gap: 18px;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+.card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(7, 11, 20, 0.72);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.28);
 }
 
-a:hover {
-  color: #535bf2;
+.hero {
+  padding: 28px;
+  border-radius: 28px;
+}
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(240px, 0.8fr);
+  gap: 18px;
+  align-items: end;
+}
+
+.eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #8ea8d9;
+  margin-bottom: 10px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
 }
 
 h1 {
-  text-align: center;
+  font-size: clamp(32px, 5vw, 54px);
+  line-height: 1;
+  max-width: 10ch;
 }
 
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+h2 {
+  font-size: 24px;
+  line-height: 1.1;
 }
 
-button {
+.hero-copy,
+.status-copy,
+.empty-state p {
+  margin-top: 12px;
+  color: rgba(233, 239, 248, 0.76);
+  max-width: 62ch;
+}
+
+.live-chip {
+  padding: 20px;
+  border-radius: 24px;
+  background: linear-gradient(145deg, rgba(36, 63, 119, 0.92), rgba(19, 31, 57, 0.92));
+  display: grid;
+  gap: 6px;
+}
+
+.live-chip span,
+.metric span,
+.table-meta,
+.empty-state strong {
+  color: rgba(226, 234, 244, 0.78);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+.live-chip strong,
+.metric strong {
+  font-size: clamp(28px, 3vw, 36px);
+  line-height: 1;
+}
+
+.live-chip small,
+.metric small {
+  color: rgba(226, 234, 244, 0.72);
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.metric {
+  padding: 22px;
+  border-radius: 24px;
+  display: grid;
+  gap: 10px;
+}
+
+.metric.down {
+  background: linear-gradient(140deg, rgba(30, 87, 164, 0.85), rgba(10, 19, 34, 0.96));
+}
+
+.metric.up {
+  background: linear-gradient(140deg, rgba(150, 79, 34, 0.88), rgba(22, 14, 9, 0.96));
+}
+
+.status,
+.table-card {
+  border-radius: 28px;
+  padding: 24px;
+}
+
+.status {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) auto;
+  gap: 16px;
+  align-items: center;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.primary,
+.secondary {
+  border: none;
+  border-radius: 999px;
+  padding: 12px 18px;
   cursor: pointer;
+  transition: transform 0.18s ease, opacity 0.18s ease;
 }
 
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+.primary {
+  background: linear-gradient(135deg, #f2f6ff, #b8d5ff);
+  color: #0f1d38;
+  font-weight: 700;
 }
 
-input,
-button {
-  outline: none;
+.secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f1e8;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-#greet-input {
-  margin-right: 5px;
+.primary:disabled,
+.secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+.primary:not(:disabled):hover,
+.secondary:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.error-copy {
+  margin-top: 10px;
+  color: #ffb48a;
+}
+
+.table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.table-wrap {
+  overflow: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+thead {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+th,
+td {
+  text-align: left;
+  padding: 15px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+th {
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(220, 229, 240, 0.72);
+}
+
+td {
+  color: #f7f7f3;
+}
+
+.empty-state {
+  min-height: 220px;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  gap: 6px;
+  color: rgba(242, 246, 255, 0.74);
+}
+
+@media (max-width: 900px) {
+  .shell {
+    padding: 16px;
   }
 
-  a:hover {
-    color: #24c8db;
+  .hero-grid,
+  .metrics,
+  .status {
+    grid-template-columns: 1fr;
   }
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
+  .actions {
+    justify-content: flex-start;
   }
 }
-
 </style>

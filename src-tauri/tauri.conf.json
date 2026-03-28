@@ -13,8 +13,9 @@
     "windows": [
       {
         "title": "netmonitor",
-        "width": 800,
-        "height": 600
+        "width": 920,
+        "height": 680,
+        "visible": false
       }
     ],
     "security": {
