@@ -60,8 +60,8 @@ pub fn render_summary_icon(down_bps: u64, up_bps: u64) -> Image<'static> {
     fill_rect(&mut rgba, 0, 0, WIDTH, HEIGHT / 2, [32, 87, 165, 255]);
     fill_rect(&mut rgba, 0, HEIGHT / 2, WIDTH, HEIGHT / 2, [169, 92, 38, 255]);
 
-    draw_text(&mut rgba, 2, 3, &format!("D{}", compact_speed(down_bps)), [255, 255, 255, 255]);
-    draw_text(&mut rgba, 2, 17, &format!("U{}", compact_speed(up_bps)), [255, 255, 255, 255]);
+    draw_text(&mut rgba, 2, 3, &compact_speed(down_bps), [255, 255, 255, 255]);
+    draw_text(&mut rgba, 2, 17, &compact_speed(up_bps), [255, 255, 255, 255]);
 
     Image::new_owned(rgba, WIDTH as u32, HEIGHT as u32)
 }
@@ -107,8 +107,6 @@ fn draw_glyph(rgba: &mut [u8], x: usize, y: usize, character: char, color: [u8; 
 fn glyph_for(character: char) -> [u8; FONT_HEIGHT] {
     match character {
         '0'..='9' => DIGITS[character as usize - '0' as usize],
-        'D' => [0b110, 0b101, 0b101, 0b101, 0b110],
-        'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
         '.' => [0b000, 0b000, 0b000, 0b010, 0b010],
         '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
         other => LETTERS

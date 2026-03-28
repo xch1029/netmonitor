@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "netmonitor",
+  "productName": "网速监控",
   "version": "0.1.0",
   "identifier": "com.zzzg.netmonitor",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "netmonitor",
+        "title": "网速监控",
         "width": 920,
         "height": 680,
         "visible": false

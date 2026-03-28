@@ -28,7 +28,7 @@ pub fn start(app: AppHandle, state: SharedState) {
             });
 
             update_summary_state(&app, &state, snapshot);
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_secs(3));
         }
     });
 }
@@ -50,7 +50,7 @@ impl SummarySampler {
         let mut up_bps = 0u64;
 
         if let Some(previous_time) = self.last_at {
-            let elapsed = now.duration_since(previous_time).as_secs_f64().max(0.5);
+            let elapsed = now.duration_since(previous_time).as_secs_f64().max(3.0);
             for (index, counter) in &counters {
                 if let Some(previous) = self.last_counters.get(index) {
                     down_bps += (((counter.in_octets.saturating_sub(previous.in_octets)) as f64 / elapsed)

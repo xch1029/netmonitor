@@ -49,20 +49,20 @@ const unlisteners = ref<UnlistenFn[]>([]);
 
 const totalTraffic = computed(() => summary.value.downBps + summary.value.upBps);
 const adapterLabel = computed(() =>
-  summary.value.adapters.length > 0 ? summary.value.adapters.join(", ") : "Waiting for active adapter",
+  summary.value.adapters.length > 0 ? summary.value.adapters.join(", ") : "等待可用网卡",
 );
 const permissionHeadline = computed(() => {
   switch (monitoringState.value.permissionState) {
     case "pending":
-      return "Waiting for Windows admin approval";
+      return "等待 Windows 管理员授权";
     case "granted":
-      return "Per-process monitoring is live";
+      return "每进程监控已开启";
     case "denied":
-      return "Admin permission was declined";
+      return "管理员授权被拒绝";
     case "error":
-      return "Process monitoring hit an error";
+      return "进程监控出现错误";
     default:
-      return "Detailed monitoring is currently off";
+      return "详细监控当前未开启";
   }
 });
 
@@ -74,7 +74,7 @@ function formatSpeed(bps: number) {
 }
 
 function formatTimestamp(value: number) {
-  if (!value) return "Not sampled yet";
+  if (!value) return "尚未采样";
   return new Date(value).toLocaleTimeString();
 }
 
@@ -135,43 +135,41 @@ onBeforeUnmount(() => {
 <template>
   <main class="shell">
     <section class="hero card">
-      <div class="eyebrow">NetMonitor</div>
+      <div class="eyebrow">网速监控</div>
       <div class="hero-grid">
         <div>
-          <h1>Windows tray speed monitor</h1>
+          <h1>Windows 托盘网速监控</h1>
           <p class="hero-copy">
-            The tray icon keeps showing live upload and download speed. This window is the detailed
-            breakdown for per-app traffic.
+            托盘区域持续显示实时上传和下载速度。这个窗口用于查看每个应用的详细网络占用情况。
           </p>
         </div>
         <div class="live-chip">
-          <span>Live total</span>
+          <span>当前总速率</span>
           <strong>{{ formatSpeed(totalTraffic) }}</strong>
-          <small>Last sample {{ formatTimestamp(summary.sampledAt) }}</small>
+          <small>最近采样 {{ formatTimestamp(summary.sampledAt) }}</small>
         </div>
       </div>
     </section>
 
     <section class="metrics">
       <article class="metric card down">
-        <span>Download</span>
+        <span>下载</span>
         <strong>{{ formatSpeed(summary.downBps) }}</strong>
         <small>{{ adapterLabel }}</small>
       </article>
       <article class="metric card up">
-        <span>Upload</span>
+        <span>上传</span>
         <strong>{{ formatSpeed(summary.upBps) }}</strong>
-        <small>Active adapters update automatically</small>
+        <small>活动网卡会自动刷新</small>
       </article>
     </section>
 
     <section class="status card">
       <div>
-        <div class="eyebrow">Process Details</div>
+        <div class="eyebrow">进程详情</div>
         <h2>{{ permissionHeadline }}</h2>
         <p class="status-copy">
-          Real-time per-process traffic uses an elevated helper so the app can stay lightweight in
-          normal tray mode.
+          每进程实时流量统计依赖提权 helper，这样主程序在普通托盘模式下可以保持轻量运行。
         </p>
         <p v-if="monitoringState.lastError" class="error-copy">{{ monitoringState.lastError }}</p>
       </div>
@@ -182,7 +180,7 @@ onBeforeUnmount(() => {
           :disabled="isBusy || monitoringState.permissionState === 'pending'"
           @click="requestProcessMonitoring"
         >
-          {{ monitoringState.processDetailsEnabled ? "Restart elevated helper" : "Enable per-app details" }}
+          {{ monitoringState.processDetailsEnabled ? "重启提权 helper" : "开启每应用详情" }}
         </button>
         <button
           class="secondary"
@@ -190,7 +188,7 @@ onBeforeUnmount(() => {
           :disabled="isBusy || !monitoringState.processDetailsEnabled"
           @click="stopProcessMonitoring"
         >
-          Stop process monitoring
+          停止进程监控
         </button>
       </div>
     </section>
@@ -198,25 +196,25 @@ onBeforeUnmount(() => {
     <section class="table-card card">
       <div class="table-header">
         <div>
-          <div class="eyebrow">Per-App Usage</div>
-          <h2>Top network consumers</h2>
+          <div class="eyebrow">应用占用</div>
+          <h2>网络占用排行</h2>
         </div>
-        <span class="table-meta">{{ processes.length }} active rows</span>
+        <span class="table-meta">{{ processes.length }} 条活动记录</span>
       </div>
 
       <div v-if="processes.length === 0" class="empty-state">
-        <strong>No per-process traffic yet</strong>
-        <p>Open a browser, stream something, or enable the elevated helper to start seeing live rankings.</p>
+        <strong>暂时没有进程流量数据</strong>
+        <p>打开浏览器、播放流媒体，或者开启提权 helper 后，这里会显示实时排行。</p>
       </div>
 
       <div v-else class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>App</th>
-              <th>Process</th>
-              <th>Download</th>
-              <th>Upload</th>
+              <th>应用</th>
+              <th>进程</th>
+              <th>下载</th>
+              <th>上传</th>
               <th>PID</th>
             </tr>
           </thead>

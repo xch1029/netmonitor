@@ -401,7 +401,7 @@ fn run_helper(config: HelperConfig) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("failed to start ETW kernel trace: {error:?}"))?;
 
     while running.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_secs(3));
         let snapshots = drain_process_buckets(&counters, &process_names);
         write_helper_message(
             &mut writer,

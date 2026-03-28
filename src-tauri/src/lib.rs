@@ -134,7 +134,7 @@ fn ensure_main_window(app: &AppHandle) -> Result<WebviewWindow> {
     }
 
     WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-        .title("netmonitor")
+        .title("网速监控")
         .inner_size(920.0, 680.0)
         .visible(false)
         .build()
@@ -190,11 +190,11 @@ fn update_tray(app: &AppHandle, summary: &SummarySnapshot) {
 
     let icon = render_summary_icon(summary.down_bps, summary.up_bps);
     let tooltip = format!(
-        "NetMonitor\nDownload: {down}\nUpload: {up}\nAdapters: {adapters}",
+        "网速监控\n下载: {down}\n上传: {up}\n网卡: {adapters}",
         down = format_speed(summary.down_bps),
         up = format_speed(summary.up_bps),
         adapters = if summary.adapters.is_empty() {
-            "Unavailable".to_string()
+            "暂无可用网卡".to_string()
         } else {
             summary.adapters.join(", ")
         }
@@ -205,12 +205,12 @@ fn update_tray(app: &AppHandle, summary: &SummarySnapshot) {
 }
 
 fn setup_tray(app: &AppHandle, state: &SharedState) -> Result<()> {
-    let open_item = MenuItem::with_id(app, "open", "Open details", true, None::<&str>)?;
+    let open_item = MenuItem::with_id(app, "open", "打开详情", true, None::<&str>)?;
     let retry_item =
-        MenuItem::with_id(app, "retry", "Retry process monitoring", true, None::<&str>)?;
+        MenuItem::with_id(app, "retry", "重试进程监控", true, None::<&str>)?;
     let stop_item =
-        MenuItem::with_id(app, "stop", "Stop process monitoring", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+        MenuItem::with_id(app, "stop", "停止进程监控", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_item, &retry_item, &stop_item, &quit_item])?;
 
     let state_for_menu = state.clone();
@@ -218,7 +218,7 @@ fn setup_tray(app: &AppHandle, state: &SharedState) -> Result<()> {
 
     TrayIconBuilder::with_id("netmonitor-tray")
         .icon(render_summary_icon(0, 0))
-        .tooltip("NetMonitor")
+        .tooltip("网速监控")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
