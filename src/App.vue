@@ -47,10 +47,10 @@ const monitoringState = ref<MonitoringState>({
 const isBusy = ref(false);
 const unlisteners = ref<UnlistenFn[]>([]);
 
-const totalTraffic = computed(() => summary.value.downBps + summary.value.upBps);
 const adapterLabel = computed(() =>
   summary.value.adapters.length > 0 ? summary.value.adapters.join(", ") : "等待可用网卡",
 );
+
 const permissionHeadline = computed(() => {
   switch (monitoringState.value.permissionState) {
     case "pending":
@@ -71,11 +71,6 @@ function formatSpeed(bps: number) {
   if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
   if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} Kbps`;
   return `${bps} bps`;
-}
-
-function formatTimestamp(value: number) {
-  if (!value) return "尚未采样";
-  return new Date(value).toLocaleTimeString();
 }
 
 async function loadBootstrap() {
@@ -134,23 +129,6 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="shell">
-    <section class="hero card">
-      <div class="eyebrow">网速监控</div>
-      <div class="hero-grid">
-        <div>
-          <h1>Windows 托盘网速监控</h1>
-          <p class="hero-copy">
-            托盘区域持续显示实时上传和下载速度。这个窗口用于查看每个应用的详细网络占用情况。
-          </p>
-        </div>
-        <div class="live-chip">
-          <span>当前总速率</span>
-          <strong>{{ formatSpeed(totalTraffic) }}</strong>
-          <small>最近采样 {{ formatTimestamp(summary.sampledAt) }}</small>
-        </div>
-      </div>
-    </section>
-
     <section class="metrics">
       <article class="metric card down">
         <span>下载</span>
@@ -162,35 +140,6 @@ onBeforeUnmount(() => {
         <strong>{{ formatSpeed(summary.upBps) }}</strong>
         <small>活动网卡会自动刷新</small>
       </article>
-    </section>
-
-    <section class="status card">
-      <div>
-        <div class="eyebrow">进程详情</div>
-        <h2>{{ permissionHeadline }}</h2>
-        <p class="status-copy">
-          每进程实时流量统计依赖提权 helper，这样主程序在普通托盘模式下可以保持轻量运行。
-        </p>
-        <p v-if="monitoringState.lastError" class="error-copy">{{ monitoringState.lastError }}</p>
-      </div>
-      <div class="actions">
-        <button
-          class="primary"
-          type="button"
-          :disabled="isBusy || monitoringState.permissionState === 'pending'"
-          @click="requestProcessMonitoring"
-        >
-          {{ monitoringState.processDetailsEnabled ? "重启提权 helper" : "开启每应用详情" }}
-        </button>
-        <button
-          class="secondary"
-          type="button"
-          :disabled="isBusy || !monitoringState.processDetailsEnabled"
-          @click="stopProcessMonitoring"
-        >
-          停止进程监控
-        </button>
-      </div>
     </section>
 
     <section class="table-card card">
@@ -228,6 +177,35 @@ onBeforeUnmount(() => {
             </tr>
           </tbody>
         </table>
+      </div>
+    </section>
+
+    <section class="status card">
+      <div>
+        <div class="eyebrow">进程详情</div>
+        <h2>{{ permissionHeadline }}</h2>
+        <p class="status-copy">
+          每进程实时流量统计依赖提权 helper，这样主程序在普通托盘模式下可以保持轻量运行。
+        </p>
+        <p v-if="monitoringState.lastError" class="error-copy">{{ monitoringState.lastError }}</p>
+      </div>
+      <div class="actions">
+        <button
+          class="primary"
+          type="button"
+          :disabled="isBusy || monitoringState.permissionState === 'pending'"
+          @click="requestProcessMonitoring"
+        >
+          {{ monitoringState.processDetailsEnabled ? "重启提权 helper" : "开启每应用详情" }}
+        </button>
+        <button
+          class="secondary"
+          type="button"
+          :disabled="isBusy || !monitoringState.processDetailsEnabled"
+          @click="stopProcessMonitoring"
+        >
+          停止进程监控
+        </button>
       </div>
     </section>
   </main>
@@ -280,18 +258,6 @@ button {
   box-shadow: 0 22px 48px rgba(0, 0, 0, 0.28);
 }
 
-.hero {
-  padding: 28px;
-  border-radius: 28px;
-}
-
-.hero-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(240px, 0.8fr);
-  gap: 18px;
-  align-items: end;
-}
-
 .eyebrow {
   font-size: 12px;
   letter-spacing: 0.22em;
@@ -300,16 +266,9 @@ button {
   margin-bottom: 10px;
 }
 
-h1,
 h2,
 p {
   margin: 0;
-}
-
-h1 {
-  font-size: clamp(32px, 5vw, 54px);
-  line-height: 1;
-  max-width: 10ch;
 }
 
 h2 {
@@ -317,41 +276,11 @@ h2 {
   line-height: 1.1;
 }
 
-.hero-copy,
 .status-copy,
 .empty-state p {
   margin-top: 12px;
   color: rgba(233, 239, 248, 0.76);
   max-width: 62ch;
-}
-
-.live-chip {
-  padding: 20px;
-  border-radius: 24px;
-  background: linear-gradient(145deg, rgba(36, 63, 119, 0.92), rgba(19, 31, 57, 0.92));
-  display: grid;
-  gap: 6px;
-}
-
-.live-chip span,
-.metric span,
-.table-meta,
-.empty-state strong {
-  color: rgba(226, 234, 244, 0.78);
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-}
-
-.live-chip strong,
-.metric strong {
-  font-size: clamp(28px, 3vw, 36px);
-  line-height: 1;
-}
-
-.live-chip small,
-.metric small {
-  color: rgba(226, 234, 244, 0.72);
 }
 
 .metrics {
@@ -365,6 +294,24 @@ h2 {
   border-radius: 24px;
   display: grid;
   gap: 10px;
+}
+
+.metric span,
+.table-meta,
+.empty-state strong {
+  color: rgba(226, 234, 244, 0.78);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+.metric strong {
+  font-size: clamp(28px, 3vw, 36px);
+  line-height: 1;
+}
+
+.metric small {
+  color: rgba(226, 234, 244, 0.72);
 }
 
 .metric.down {
@@ -488,7 +435,6 @@ td {
     padding: 16px;
   }
 
-  .hero-grid,
   .metrics,
   .status {
     grid-template-columns: 1fr;

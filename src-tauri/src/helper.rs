@@ -156,8 +156,8 @@ fn accept_helper(
     }
 
     update_monitoring_state(app, state, |monitoring| {
-        monitoring.process_details_enabled = true;
-        monitoring.permission_state = PermissionState::Granted;
+        monitoring.process_details_enabled = false;
+        monitoring.permission_state = PermissionState::Pending;
         monitoring.last_error = None;
     });
 
@@ -173,7 +173,32 @@ fn accept_helper(
                     break;
                 }
                 Ok(_) => match serde_json::from_str::<HelperMessage>(line.trim()) {
+                    Ok(HelperMessage::Ready) => {
+                        update_monitoring_state(
+                            &app_handle,
+                            &state_for_reader,
+                            |monitoring: &mut MonitoringState| {
+                                monitoring.process_details_enabled = true;
+                                monitoring.permission_state = PermissionState::Granted;
+                                monitoring.last_error = None;
+                            },
+                        );
+                    }
                     Ok(HelperMessage::Processes { processes, .. }) => {
+                        {
+                            let current = state_for_reader.monitoring.read().unwrap().clone();
+                            if current.permission_state == PermissionState::Pending {
+                                update_monitoring_state(
+                                    &app_handle,
+                                    &state_for_reader,
+                                    |monitoring: &mut MonitoringState| {
+                                        monitoring.process_details_enabled = true;
+                                        monitoring.permission_state = PermissionState::Granted;
+                                        monitoring.last_error = None;
+                                    },
+                                );
+                            }
+                        }
                         update_process_state(&app_handle, &state_for_reader, processes);
                     }
                     Ok(HelperMessage::Error { message }) => {
@@ -181,9 +206,9 @@ fn accept_helper(
                             &app_handle,
                             &state_for_reader,
                             |monitoring: &mut MonitoringState| {
-                            monitoring.process_details_enabled = false;
-                            monitoring.permission_state = PermissionState::Error;
-                            monitoring.last_error = Some(message.clone());
+                                monitoring.process_details_enabled = false;
+                                monitoring.permission_state = PermissionState::Error;
+                                monitoring.last_error = Some(message.clone());
                             },
                         );
                     }
@@ -224,8 +249,14 @@ fn accept_helper(
         if current.permission_state == PermissionState::Granted {
             update_monitoring_state(&app_handle, &state_for_reader, |monitoring| {
                 monitoring.process_details_enabled = false;
-                monitoring.permission_state = PermissionState::Idle;
-                monitoring.last_error = None;
+                monitoring.permission_state = PermissionState::Error;
+                monitoring.last_error = Some("进程监控 helper 已退出".to_string());
+            });
+        } else if current.permission_state == PermissionState::Pending {
+            update_monitoring_state(&app_handle, &state_for_reader, |monitoring| {
+                monitoring.process_details_enabled = false;
+                monitoring.permission_state = PermissionState::Error;
+                monitoring.last_error = Some("进程监控未成功启动".to_string());
             });
         }
     });
@@ -367,6 +398,7 @@ fn run_helper(config: HelperConfig) -> Result<()> {
     let process_names = Arc::new(Mutex::new(load_process_names()));
     let counters = Arc::new(Mutex::new(HashMap::<u32, ProcessBucket>::new()));
     let running = Arc::new(AtomicBool::new(true));
+    let trace_name = format!("netmonitor-helper-{}-{}", std::process::id(), now_epoch_ms());
 
     let running_for_reader = running.clone();
     let reader_handle = thread::spawn(move || -> Result<()> {
@@ -394,22 +426,45 @@ fn run_helper(config: HelperConfig) -> Result<()> {
     let tcp_provider = build_tcp_provider(process_names.clone(), counters.clone());
     let process_provider = build_process_provider(process_names.clone());
     let kernel_trace = KernelTrace::new()
-        .named("netmonitor-helper".to_string())
+        .named(trace_name)
         .enable(tcp_provider)
         .enable(process_provider)
         .start_and_process()
-        .map_err(|error| anyhow::anyhow!("failed to start ETW kernel trace: {error:?}"))?;
+        .map_err(|error| anyhow::anyhow!("failed to start ETW kernel trace: {error:?}"));
+
+    let kernel_trace = match kernel_trace {
+        Ok(trace) => trace,
+        Err(error) => {
+            let _ = write_helper_message(
+                &mut writer,
+                &HelperMessage::Error {
+                    message: format!("ETW 启动失败: {error}"),
+                },
+            );
+            return Err(error);
+        }
+    };
+
+    write_helper_message(&mut writer, &HelperMessage::Ready)?;
 
     while running.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_secs(3));
         let snapshots = drain_process_buckets(&counters, &process_names);
-        write_helper_message(
+        if let Err(error) = write_helper_message(
             &mut writer,
             &HelperMessage::Processes {
                 sampled_at: now_epoch_ms(),
                 processes: snapshots,
             },
-        )?;
+        ) {
+            let _ = write_helper_message(
+                &mut writer,
+                &HelperMessage::Error {
+                    message: format!("发送进程监控数据失败: {error}"),
+                },
+            );
+            return Err(error);
+        }
     }
 
     let _ = kernel_trace.stop();
@@ -562,11 +617,161 @@ fn load_process_names() -> HashMap<u32, String> {
 }
 
 fn display_name_from_image(image_name: &str) -> String {
-    PathBuf::from(image_name)
+    #[cfg(target_os = "windows")]
+    if let Some(friendly_name) = file_description_from_path(image_name) {
+        return friendly_name;
+    }
+
+    let stem = PathBuf::from(image_name)
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| image_name.to_string())
+        .unwrap_or_else(|| image_name.to_string());
+
+    friendly_name_fallback(&stem)
+}
+
+fn friendly_name_fallback(name: &str) -> String {
+    let normalized = name.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "msedge" => "Microsoft Edge".to_string(),
+        "chrome" => "Google Chrome".to_string(),
+        "code" => "Visual Studio Code".to_string(),
+        "wechat" => "WeChat".to_string(),
+        "qq" => "QQ".to_string(),
+        "explorer" => "Windows Explorer".to_string(),
+        "powershell" => "Windows PowerShell".to_string(),
+        "pwsh" => "PowerShell".to_string(),
+        "cmd" => "Command Prompt".to_string(),
+        "spotify" => "Spotify".to_string(),
+        _ => humanize_process_name(name),
+    }
+}
+
+fn humanize_process_name(name: &str) -> String {
+    let mut result = String::new();
+    let mut previous_is_lower_or_digit = false;
+
+    for character in name.chars() {
+        let is_separator = matches!(character, '_' | '-' | '.');
+        if is_separator {
+            if !result.ends_with(' ') && !result.is_empty() {
+                result.push(' ');
+            }
+            previous_is_lower_or_digit = false;
+            continue;
+        }
+
+        let is_upper = character.is_ascii_uppercase();
+        if is_upper && previous_is_lower_or_digit && !result.ends_with(' ') {
+            result.push(' ');
+        }
+
+        result.push(character);
+        previous_is_lower_or_digit = character.is_ascii_lowercase() || character.is_ascii_digit();
+    }
+
+    let result = result.split_whitespace().collect::<Vec<_>>().join(" ");
+    if result.is_empty() {
+        name.to_string()
+    } else {
+        result
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn file_description_from_path(image_name: &str) -> Option<String> {
+    use std::{ffi::c_void, ptr::null_mut, slice};
+
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW},
+    };
+
+    let path = PathBuf::from(image_name);
+    if !path.is_file() {
+        return None;
+    }
+
+    let wide_path = encode_wide(path.as_os_str());
+    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(wide_path.as_ptr()), None) };
+    if size == 0 {
+        return None;
+    }
+
+    let mut version_data = vec![0u8; size as usize];
+    if unsafe {
+        GetFileVersionInfoW(
+            PCWSTR(wide_path.as_ptr()),
+            None,
+            size,
+            version_data.as_mut_ptr() as *mut c_void,
+        )
+    }
+    .is_err()
+    {
+        return None;
+    }
+
+    let mut translation_ptr: *mut c_void = null_mut();
+    let mut translation_len = 0u32;
+    let translation_key = encode_wide(r"\VarFileInfo\Translation");
+    let translation = if unsafe {
+        VerQueryValueW(
+            version_data.as_ptr() as *const c_void,
+            PCWSTR(translation_key.as_ptr()),
+            &mut translation_ptr,
+            &mut translation_len,
+        )
+    }
+    .as_bool()
+        && translation_len >= 4
+    {
+        let values = unsafe { slice::from_raw_parts(translation_ptr as *const u16, 2) };
+        Some((values[0], values[1]))
+    } else {
+        None
+    };
+
+    let candidates = match translation {
+        Some((language, code_page)) => vec![
+            format!(r"\StringFileInfo\{language:04x}{code_page:04x}\FileDescription"),
+            r"\StringFileInfo\040904b0\FileDescription".to_string(),
+        ],
+        None => vec![
+            r"\StringFileInfo\040904b0\FileDescription".to_string(),
+            r"\StringFileInfo\080404b0\FileDescription".to_string(),
+        ],
+    };
+
+    for candidate in candidates {
+        let mut value_ptr: *mut c_void = null_mut();
+        let mut value_len = 0u32;
+        let candidate_wide = encode_wide(candidate);
+
+        let success = unsafe {
+            VerQueryValueW(
+                version_data.as_ptr() as *const c_void,
+                PCWSTR(candidate_wide.as_ptr()),
+                &mut value_ptr,
+                &mut value_len,
+            )
+        }
+        .as_bool();
+
+        if !success || value_ptr.is_null() || value_len == 0 {
+            continue;
+        }
+
+        let raw = unsafe { slice::from_raw_parts(value_ptr as *const u16, value_len as usize) };
+        let end = raw.iter().position(|value| *value == 0).unwrap_or(raw.len());
+        let text = String::from_utf16_lossy(&raw[..end]).trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+
+    None
 }
 
 fn write_helper_message(writer: &mut Stream, message: &HelperMessage) -> Result<()> {

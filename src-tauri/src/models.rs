@@ -59,6 +59,7 @@ pub struct BootstrapState {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HelperMessage {
     Hello { token: String },
+    Ready,
     Processes {
         sampled_at: u64,
         processes: Vec<ProcessSnapshot>,
