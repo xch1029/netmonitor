@@ -71,9 +71,7 @@ const primaryActionLabel = computed(() => {
   }
 });
 
-const panelTitle = computed(() =>
-  processMonitoringActive.value ? "网络占用排行" : "应用占用",
-);
+
 
 const panelDescription = computed(() => {
   switch (monitoringState.value.permissionState) {
@@ -156,8 +154,7 @@ onBeforeUnmount(() => {
     <section class="table-card card">
       <div class="table-header">
         <div>
-          <div class="eyebrow">应用占用</div>
-          <h2>{{ panelTitle }}</h2>
+          <div class="eyebrow">网络占用排行</div>
           <p class="table-copy">{{ panelDescription }}</p>
           <p v-if="monitoringState.lastError" class="error-copy">{{ monitoringState.lastError }}</p>
         </div>
@@ -250,6 +247,7 @@ button {
   padding: 10px;
   display: grid;
   gap: 10px;
+  grid-template-rows: auto 1fr;
 }
 
 .card {

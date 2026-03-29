@@ -31,6 +31,7 @@ pub struct AppState {
     pub monitoring: RwLock<MonitoringState>,
     pub helper: Mutex<Option<HelperSession>>,
     pub details_visible: AtomicBool,
+    pub process_monitoring_prompted: AtomicBool,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -50,7 +51,8 @@ fn show_details_window(
     state: State<'_, SharedState>,
 ) -> std::result::Result<MonitoringState, String> {
     show_details_window_inner(&app).map_err(|error| error.to_string())?;
-    request_process_monitoring_inner(&app, state.inner().clone()).map_err(|error| error.to_string())
+    maybe_request_process_monitoring_inner(&app, state.inner().clone())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -59,7 +61,7 @@ fn hide_details_window(
     state: State<'_, SharedState>,
 ) -> std::result::Result<MonitoringState, String> {
     hide_details_window_inner(&app).map_err(|error| error.to_string())?;
-    stop_process_monitoring_inner(&app, state.inner().clone()).map_err(|error| error.to_string())
+    Ok(state.monitoring.read().unwrap().clone())
 }
 
 #[tauri::command]
@@ -126,6 +128,20 @@ pub fn update_monitoring_state(
 
 pub fn clear_process_state(app: &AppHandle, state: &SharedState) {
     update_process_state(app, state, Vec::new());
+}
+
+fn maybe_request_process_monitoring_inner(
+    app: &AppHandle,
+    state: SharedState,
+) -> Result<MonitoringState> {
+    if state
+        .process_monitoring_prompted
+        .swap(true, Ordering::Relaxed)
+    {
+        return Ok(state.monitoring.read().unwrap().clone());
+    }
+
+    request_process_monitoring_inner(app, state)
 }
 
 fn ensure_main_window(app: &AppHandle) -> Result<WebviewWindow> {
@@ -224,7 +240,7 @@ fn setup_tray(app: &AppHandle, state: &SharedState) -> Result<()> {
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "open" => {
                 let _ = show_details_window_inner(app);
-                let _ = request_process_monitoring_inner(app, state_for_menu.clone());
+                let _ = maybe_request_process_monitoring_inner(app, state_for_menu.clone());
             }
             "retry" => {
                 let _ = request_process_monitoring_inner(app, state_for_menu.clone());
@@ -244,7 +260,7 @@ fn setup_tray(app: &AppHandle, state: &SharedState) -> Result<()> {
             {
                 let app = tray.app_handle();
                 let _ = show_details_window_inner(&app);
-                let _ = request_process_monitoring_inner(&app, state_for_tray.clone());
+                let _ = maybe_request_process_monitoring_inner(&app, state_for_tray.clone());
             }
         })
         .build(app)
@@ -253,16 +269,14 @@ fn setup_tray(app: &AppHandle, state: &SharedState) -> Result<()> {
     Ok(())
 }
 
-fn install_window_behavior(app: &AppHandle, state: &SharedState) -> Result<()> {
+fn install_window_behavior(app: &AppHandle, _state: &SharedState) -> Result<()> {
     let window = ensure_main_window(app)?;
     let app_handle = app.clone();
-    let state = state.clone();
 
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             let _ = hide_details_window_inner(&app_handle);
-            let _ = stop_process_monitoring_inner(&app_handle, state.clone());
         }
     });
 

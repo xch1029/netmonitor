@@ -16,7 +16,7 @@ use ferrisetw::{
     parser::Parser,
     provider::{kernel_providers, Provider},
     schema_locator::SchemaLocator,
-    trace::KernelTrace,
+    trace::{stop_trace_by_name, KernelTrace},
     EventRecord,
 };
 use interprocess::TryClone;
@@ -33,6 +33,8 @@ use crate::{
 pub struct HelperSession {
     pub writer: Arc<Mutex<Stream>>,
 }
+
+const PROCESS_TRACE_NAME: &str = "netmonitor-process-monitor";
 
 pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
     match helper_args(args) {
@@ -55,6 +57,10 @@ pub fn request_process_monitoring_inner(
     app: &AppHandle,
     state: SharedState,
 ) -> Result<MonitoringState> {
+    state
+        .process_monitoring_prompted
+        .store(true, Ordering::Relaxed);
+
     {
         let monitoring = state.monitoring.read().unwrap().clone();
         if monitoring.process_details_enabled || monitoring.permission_state == PermissionState::Pending {
@@ -402,7 +408,6 @@ fn run_helper(config: HelperConfig) -> Result<()> {
     let display_names = Arc::new(Mutex::new(HashMap::<u32, String>::new()));
     let counters = Arc::new(Mutex::new(HashMap::<u32, ProcessBucket>::new()));
     let running = Arc::new(AtomicBool::new(true));
-    let trace_name = format!("netmonitor-helper-{}-{}", std::process::id(), now_epoch_ms());
 
     let running_for_reader = running.clone();
     let reader_handle = thread::spawn(move || -> Result<()> {
@@ -427,14 +432,8 @@ fn run_helper(config: HelperConfig) -> Result<()> {
         Ok(())
     });
 
-    let tcp_provider = build_tcp_provider(process_names.clone(), counters.clone());
-    let process_provider = build_process_provider(process_names.clone(), display_names.clone());
-    let kernel_trace = KernelTrace::new()
-        .named(trace_name)
-        .enable(tcp_provider)
-        .enable(process_provider)
-        .start_and_process()
-        .map_err(|error| anyhow::anyhow!("failed to start ETW kernel trace: {error:?}"));
+    let kernel_trace =
+        start_process_trace(process_names.clone(), counters.clone(), display_names.clone());
 
     let kernel_trace = match kernel_trace {
         Ok(trace) => trace,
@@ -520,6 +519,39 @@ fn build_tcp_provider(
     Provider::kernel(&kernel_providers::TCP_IP_PROVIDER)
         .add_callback(callback)
         .build()
+}
+
+fn start_process_trace(
+    process_names: Arc<Mutex<HashMap<u32, String>>>,
+    counters: Arc<Mutex<HashMap<u32, ProcessBucket>>>,
+    display_names: Arc<Mutex<HashMap<u32, String>>>,
+) -> Result<KernelTrace> {
+    match build_process_trace(process_names.clone(), counters.clone(), display_names.clone()) {
+        Ok(trace) => Ok(trace),
+        Err(initial_error) => {
+            let _ = stop_trace_by_name(PROCESS_TRACE_NAME);
+            build_process_trace(process_names, counters, display_names).map_err(|retry_error| {
+                anyhow::anyhow!(
+                    "failed to start ETW kernel trace after resetting stale session: {retry_error:?}; initial error: {initial_error:?}"
+                )
+            })
+        }
+    }
+}
+
+fn build_process_trace(
+    process_names: Arc<Mutex<HashMap<u32, String>>>,
+    counters: Arc<Mutex<HashMap<u32, ProcessBucket>>>,
+    display_names: Arc<Mutex<HashMap<u32, String>>>,
+) -> std::result::Result<KernelTrace, ferrisetw::trace::TraceError> {
+    let tcp_provider = build_tcp_provider(process_names.clone(), counters);
+    let process_provider = build_process_provider(process_names, display_names);
+
+    KernelTrace::new()
+        .named(PROCESS_TRACE_NAME.to_string())
+        .enable(tcp_provider)
+        .enable(process_provider)
+        .start_and_process()
 }
 
 fn build_process_provider(
